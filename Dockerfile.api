@@ -1,0 +1,44 @@
+# API и бот — один образ, разные команды. Зависимостей в рантайме нет вообще:
+# HTTP из node:http, база из node:sqlite. Ставить в прод нечего, ломаться нечему.
+FROM node:24-alpine
+
+ARG GIT_SHA=dev
+ENV NODE_ENV=production \
+    GIT_SHA=${GIT_SHA}
+LABEL org.opencontainers.image.title="corpfly-api" \
+      org.opencontainers.image.description="CORPFLY API + Telegram bot" \
+      org.opencontainers.image.revision="${GIT_SHA}"
+
+# Догоняем alpine-репозиторий: базовый образ отстаёт, и trivy валит гейт на HIGH,
+# для которых патч уже есть.
+#
+# И выбрасываем npm с corepack. В рантайме у сервиса НОЛЬ зависимостей — HTTP из
+# node:http, база из node:sqlite, — а npm тащит за собой собственный node_modules,
+# который и давал все четыре HIGH (brace-expansion, ip-address, tar). Уязвимость в
+# коде, который никогда не исполняется, всё равно уязвимость в поставке: проще не
+# поставлять. В образе остаётся один бинарь node.
+# hadolint ignore=DL3017
+RUN apk --no-cache upgrade \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
+
+WORKDIR /app
+COPY server/src ./server/src
+COPY package.json ./
+
+# Писать процесс должен только в /app/data. Код приложения рантайм-пользователю НЕ
+# принадлежит: иначе исполнение произвольного кода переписывает собственный исходник,
+# и правка переживает restart, потому что контейнер перезапускается, а не пересоздаётся.
+RUN mkdir -p /app/data \
+ && chown -R root:root /app && chmod -R a-w /app \
+ && chown -R node:node /app/data && chmod 700 /app/data
+USER node
+
+ENV CORPFLY_DB=/app/data/corpfly.sqlite \
+    PORT=8261
+EXPOSE 8261
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8261/api/health | grep -q '"ok":true' || exit 1
+
+CMD ["node", "server/src/server.js"]

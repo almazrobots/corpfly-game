@@ -1,0 +1,156 @@
+# Quality gate.
+#
+# Everything here runs on GitHub-hosted runners and uses no secrets at all.
+# That is deliberate: this is a public repository, so a pull request can come
+# from anyone, and `npm ci`, the test suite and the e2e run all execute the
+# author's code. Self-hosted runners have no place in that picture — GitHub
+# says so plainly, and standard runners are free for public repositories.
+#
+# Order: secret scan -> lint -> unit/property tests with coverage thresholds ->
+# Dockerfile lint -> build BOTH images -> actually RUN them -> e2e.
+#
+# Running the image is not decoration. Build, unit tests and vulnerability scan
+# were all green at a moment when the page was shipping with no CSP header at
+# all, because an `add_header` inside an nginx `location` cancels the inherited
+# ones. Only a started container caught it.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Every action is pinned to a commit SHA, not a tag. A tag is a movable pointer:
+# whoever controls the action's repository can repoint it at different code, and
+# that code then runs inside this workflow. The human-readable version stays in a
+# trailing comment so updates remain reviewable.
+
+jobs:
+  quality:
+    name: Quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0            # full history for the secret scan
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+
+      # --ignore-scripts: lifecycle scripts in a lockfile are code too, and on a
+      # pull request that code belongs to a stranger.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit and property tests with coverage thresholds
+        run: npx vitest run --coverage
+
+      - name: Lint Dockerfiles
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with: { dockerfile: Dockerfile.web }
+      - uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with: { dockerfile: Dockerfile.api }
+
+      - name: Build images
+        run: |
+          set -euo pipefail
+          docker build --build-arg GIT_SHA="${GITHUB_SHA}" -f Dockerfile.web -t corpfly-web:ci .
+          docker build --build-arg GIT_SHA="${GITHUB_SHA}" -f Dockerfile.api -t corpfly-api:ci .
+
+      - name: Run the images and check they do real work
+        run: |
+          set -euo pipefail
+          docker rm -f cf-web cf-api >/dev/null 2>&1 || true
+          docker run -d --name cf-web -p 127.0.0.1:48080:8080 corpfly-web:ci >/dev/null
+          docker run -d --name cf-api -p 127.0.0.1:48261:8261 \
+            -e BOT_TOKEN=smoke:token -e CORPFLY_DB=:memory: -e GIT_SHA="${GITHUB_SHA}" corpfly-api:ci >/dev/null
+
+          ok=0
+          for _ in $(seq 1 30); do
+            w=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:48080/healthz || true)
+            a=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:48261/api/health || true)
+            [ "$w" = "200" ] && [ "$a" = "200" ] && { ok=1; break; }
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "::error::containers did not answer in 60s"; docker logs cf-web 2>&1 | tail -20; docker logs cf-api 2>&1 | tail -20; exit 1; }
+
+          rev=$(curl -s --max-time 5 http://127.0.0.1:48261/api/health | sed -n 's/.*"revision":"\([^"]*\)".*/\1/p')
+          [ "$rev" = "$GITHUB_SHA" ] || { echo "::error::image reports revision '$rev', expected $GITHUB_SHA"; exit 1; }
+
+          for p in / /src/main.js /src/engine.js /icon.svg /app.webmanifest; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:48080$p")
+            echo "$p -> $code"
+            [ "$code" = "200" ] || { echo "::error::$p returned $code"; exit 1; }
+          done
+
+          hdrs=$(curl -sI --max-time 5 http://127.0.0.1:48080/)
+          echo "$hdrs" | grep -qi 'content-security-policy' || { echo "::error::the game page ships without a CSP"; exit 1; }
+          echo "$hdrs" | grep -qi 'frame-ancestors .*telegram' || { echo "::error::CSP does not allow Telegram to frame the app"; exit 1; }
+          ! echo "$hdrs" | grep -qi '^x-frame-options' || { echo "::error::X-Frame-Options would break Telegram Web"; exit 1; }
+
+          # A full player round-trip against the running image, including the
+          # promise that nothing personal comes back out.
+          node --input-type=module -e '
+            const { signInitData } = await import("./server/src/initdata.js");
+            const T = "smoke:token", B = "http://127.0.0.1:48261";
+            const id = (n, f, l) => signInitData({ user: JSON.stringify({ id: n, first_name: f, last_name: l }), auth_date: String(Math.floor(Date.now()/1000)) }, T);
+            const post = (p, b) => fetch(B+p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }).then(r => r.json());
+            const s = await post("/api/session", { initData: id(111, "Ada", "Lovelace") });
+            if (!s.ok || s.you.handle !== "#1 AL") throw new Error("session: " + JSON.stringify(s));
+            const sc = await post("/api/score", { initData: id(111, "Ada", "Lovelace"), score: 30 });
+            if (!sc.ok || sc.you.best !== 30 || sc.you.rank !== 1) throw new Error("score: " + JSON.stringify(sc));
+            const forged = await post("/api/session", { initData: "forged&hash=" + "0".repeat(64) });
+            if (forged.ok) throw new Error("a forged initData was accepted");
+            const lb = await fetch(B + "/api/leaderboard").then(r => r.json());
+            const dump = JSON.stringify(lb);
+            if (!lb.ok || lb.board.length !== 1) throw new Error("leaderboard: " + dump);
+            if ("you" in lb) throw new Error("the public board must not identify its reader");
+            for (const leak of ["111", "Lovelace", "Ada"]) if (dump.includes(leak)) throw new Error("personal data leaked: " + leak);
+            console.log("round-trip ok:", lb.board[0].handle, lb.board[0].best);
+          '
+
+      - name: Stop containers
+        if: ${{ always() }}
+        run: docker rm -f cf-web cf-api >/dev/null 2>&1 || true
+
+      - name: End-to-end tests
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+      - name: Scan images for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: corpfly-api:ci
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: corpfly-web:ci
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+          exit-code: "1"

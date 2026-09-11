@@ -1,0 +1,111 @@
+# CORPFLY — self-hosting stack.
+#
+# Unlike a deployment pipeline, this file BUILDS from source: clone the repo,
+# drop your bot token into deploy/.env, and bring it up. There is no registry
+# and no orchestration to set up first.
+#
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+#
+# Ports bind to loopback only. Terminate TLS in front of the stack and route
+# /api/* to the api service — see Caddyfile.example. Telegram requires HTTPS.
+
+name: corpfly
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8260:8080"
+    mem_limit: 128m
+    cpus: 0.5
+    # The image is nginx-unprivileged: uid 101, no root anywhere, so no cap_add.
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=16m
+      - /var/run:size=1m
+      - /tmp:size=4m
+    security_opt: [ "no-new-privileges:true" ]
+    cap_drop: [ ALL ]
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz | grep -q '\"ok\"' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging: *logging
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    # BOT_TOKEN is required. Without it there is nothing to verify initData
+    # against, and the process refuses to start on purpose rather than opening
+    # the Mini App to everyone.
+    environment:
+      NODE_ENV: production
+      PORT: "8261"
+      CORPFLY_DB: /app/data/corpfly.sqlite
+      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN in deploy/.env}
+    ports:
+      - "127.0.0.1:8261:8261"
+    volumes:
+      - data:/app/data
+    mem_limit: 256m
+    cpus: 1.0
+    # Writes go only to the data volume; SQLite keeps its -wal and -shm there too.
+    read_only: true
+    tmpfs: [ "/tmp:size=4m" ]
+    pids_limit: 128
+    security_opt: [ "no-new-privileges:true" ]
+    cap_drop: [ ALL ]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8261/api/health | grep -q '\"ok\":true' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *logging
+
+  bot:
+    build:
+      context: ..
+      dockerfile: Dockerfile.api      # same image, different command
+    restart: unless-stopped
+    command: ["node", "server/src/bot.js"]
+    environment:
+      NODE_ENV: production
+      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN in deploy/.env}
+      APP_URL: ${APP_URL:?set APP_URL in deploy/.env — the public https:// address of the Mini App}
+      API_ORIGIN: http://api:8261
+    depends_on:
+      api: { condition: service_healthy }
+    mem_limit: 192m
+    cpus: 0.5
+    read_only: true
+    tmpfs: [ "/tmp:size=4m" ]
+    pids_limit: 64
+    security_opt: [ "no-new-privileges:true" ]
+    cap_drop: [ ALL ]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f bot.js >/dev/null || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *logging
+
+volumes:
+  data:
+    # Named volume so recreating the stack does not wipe the leaderboard —
+    # losing it would also lose every player's activation number, i.e. their identity.
+    name: corpfly_data

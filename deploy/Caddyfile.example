@@ -1,0 +1,45 @@
+# Example TLS front for CORPFLY. Replace the domain and point DNS at your host.
+#
+# One vhost, two upstreams: /api/* goes to the API, everything else to the static
+# game. Order matters — the /api/* handler must come first.
+
+your-domain.example {
+	encode zstd gzip
+
+	# Request headers land in access logs in full. Drop anything that could carry
+	# a credential, so a future change does not start writing them to disk.
+	log {
+		format filter {
+			request>headers>Cookie delete
+			request>headers>Authorization delete
+		}
+	}
+
+	handle /api/* {
+		header {
+			Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+			Cross-Origin-Resource-Policy "same-origin"
+		}
+		reverse_proxy 127.0.0.1:8261 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8260 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# No X-Frame-Options here on purpose: Telegram Web opens the Mini App in an
+	# iframe and DENY would break it. The frame is restricted by the CSP that
+	# nginx serves with the page (see deploy/nginx.conf).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

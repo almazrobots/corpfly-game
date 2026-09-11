@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<title>CORPFLY — 166,700 neurons vs. the enterprise</title>
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="manifest" href="./app.webmanifest">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:#0e1424; --bg2:#141c30; --ink:#dfe7f5; --dim:#7d8aa5;
+    --hud:#8ee6f2; --pain:#ff7a59; --block:#2a3552; --block2:#1c2540; --edge:#4d5f8a;
+    /* Высота нижней панели. Место под неё резервируется ВСЕГДА, даже когда панель
+       скрыта на время забега: иначе холст на старте прыгал бы, а нижний HUD игры
+       (спайк-растр и счётчик) уезжал под панель. */
+    --bar-h:72px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;background:var(--bg);color:var(--ink);font-family:"Courier New",ui-monospace,Menlo,monospace;overflow:hidden;overscroll-behavior:none;touch-action:none;user-select:none;-webkit-user-select:none}
+  #wrap{position:fixed;inset:0;bottom:calc(var(--bar-h) + env(safe-area-inset-bottom));display:flex;align-items:center;justify-content:center}
+  canvas{display:block;background:var(--bg);max-height:100%;max-width:100%}
+  #ui{position:fixed;inset:0;pointer-events:none;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px}
+  .card{pointer-events:auto;background:rgba(14,20,36,.92);border:1px solid var(--edge);border-radius:6px;padding:22px 20px;max-width:340px;width:100%;box-shadow:0 0 0 4px rgba(142,230,242,.06)}
+  h1{font-size:30px;letter-spacing:.06em;color:var(--hud);font-weight:700}
+  h1 small{display:block;font-size:11px;letter-spacing:.2em;color:var(--dim);font-weight:400;margin-top:4px}
+  p{font-size:13px;line-height:1.5;color:var(--ink);margin:12px 0}
+  .stat{display:flex;justify-content:space-between;font-size:12px;color:var(--dim);border-top:1px dashed var(--edge);padding-top:8px;margin-top:8px;gap:10px}
+  .stat b{color:var(--hud);font-weight:700;white-space:nowrap}
+  .cause{color:var(--pain);font-size:15px;font-weight:700;letter-spacing:.04em}
+  /* Итог выделен: именно он уезжает в рейтинг, остальные строки — его слагаемые. */
+  .stat.total{border-top:1px solid var(--hud);margin-top:10px;padding-top:10px}
+  .stat.total span{color:var(--ink)}
+  .stat.total b{font-size:18px}
+  button{pointer-events:auto;font:inherit;font-size:15px;font-weight:700;letter-spacing:.08em;color:#0e1424;background:var(--hud);border:0;border-radius:4px;padding:12px 22px;margin-top:14px;cursor:pointer;width:100%}
+  button.ghost{background:transparent;color:var(--hud);border:1px solid var(--edge);margin-top:8px}
+  button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .hint{font-size:11px;color:var(--dim);margin-top:10px}
+  /* !important здесь по делу: #bar и #count объявляют display через селектор по id,
+     а он по специфичности сильнее класса — и .hidden молча переставал работать.
+     Утилита видимости обязана выигрывать у любого раскладочного правила. */
+  .hidden{display:none !important}
+
+  /* Нижняя плоская панель. Сетка из трёх колонок, а не flex с space-between:
+     пустая левая колонка шириной с кубок держит главную кнопку РОВНО по центру. */
+  #bar{
+    position:fixed;left:0;right:0;bottom:0;z-index:5;
+    display:grid;grid-template-columns:52px 1fr 52px;gap:12px;align-items:center;
+    min-height:var(--bar-h);
+    padding:12px 14px;padding-bottom:calc(12px + env(safe-area-inset-bottom));
+    background:rgba(14,20,36,.97);border-top:1px solid var(--edge);
+  }
+  #bar button{margin-top:0}
+  #go{font-size:16px;padding:14px 18px}
+  #boardBtn{
+    width:52px;height:48px;padding:0;background:transparent;border:1px solid var(--edge);
+    color:var(--hud);display:flex;align-items:center;justify-content:center;
+  }
+  #boardBtn svg,#soundBtn svg{width:24px;height:24px;display:block}
+  #boardBtn:active,#soundBtn:active{background:rgba(142,230,242,.12)}
+  #soundBtn{
+    width:52px;height:48px;padding:0;background:transparent;border:1px solid var(--edge);
+    color:var(--hud);display:flex;align-items:center;justify-content:center;
+  }
+  /* Выключенный звук: волны гаснут, появляется перечёркивание. Состояние читается
+     и по значку, и по aria-pressed — кнопка без подписи обязана говорить обоими. */
+  #soundBtn .slash{opacity:0}
+  #soundBtn[aria-pressed="false"]{color:var(--dim);border-color:rgba(77,95,138,.5)}
+  #soundBtn[aria-pressed="false"] .wave{opacity:0}
+  #soundBtn[aria-pressed="false"] .slash{opacity:1}
+  /* Карточки живут в той же области, что и холст. */
+  #ui{bottom:calc(var(--bar-h) + env(safe-area-inset-bottom))}
+
+  /* Дублёр звука поверх игры: мелкий, полупрозрачный, в углу — чтобы не спорил
+     с областью тапа и не мозолил глаз во время забега. */
+  #soundMini{
+    position:fixed;top:10px;right:10px;z-index:7;
+    width:38px;height:38px;padding:0;margin:0;border-radius:4px;
+    background:rgba(14,20,36,.72);border:1px solid var(--edge);color:var(--hud);
+    display:flex;align-items:center;justify-content:center;opacity:.65;
+  }
+  #soundMini svg{width:19px;height:19px;display:block}
+  #soundMini:active{opacity:1;background:rgba(142,230,242,.14)}
+  #soundMini .slash{opacity:0}
+  #soundMini[aria-pressed="false"]{color:var(--dim)}
+  #soundMini[aria-pressed="false"] .wave{opacity:0}
+  #soundMini[aria-pressed="false"] .slash{opacity:1}
+
+  /* Отсчёт: крупная цифра поверх уже собранного поля. */
+  #count{
+    position:fixed;inset:0;z-index:6;display:flex;align-items:center;justify-content:center;
+    pointer-events:none;flex-direction:column;gap:10px;
+  }
+  #countNum{
+    font-size:96px;font-weight:700;line-height:1;color:var(--hud);letter-spacing:.04em;
+    text-shadow:0 0 24px rgba(142,230,242,.45);animation:pop .42s ease-out;
+  }
+  #countNum.go{font-size:60px;color:var(--pain);text-shadow:0 0 24px rgba(255,122,89,.5)}
+  #countHint{font-size:11px;letter-spacing:.22em;color:var(--dim)}
+  @keyframes pop{from{transform:scale(1.55);opacity:0}to{transform:scale(1);opacity:1}}
+  @media (prefers-reduced-motion:reduce){#countNum{animation:none}}
+  /* Ranking: same visual language — monospace column, HUD-coloured edge on your own row. */
+  #boardList{list-style:none;max-height:46vh;overflow-y:auto;margin-top:12px;text-align:left;border-top:1px dashed var(--edge)}
+  #boardList li{display:flex;align-items:baseline;gap:8px;font-size:13px;padding:7px 6px;border-bottom:1px solid rgba(77,95,138,.28)}
+  #boardList li .pos{color:var(--dim);width:2.4em;text-align:right;font-size:11px;flex:none}
+  #boardList li .who{color:var(--ink);flex:1;letter-spacing:.04em}
+  #boardList li .pts{color:var(--hud);font-weight:700;flex:none}
+  #boardList li.me{background:rgba(142,230,242,.08);border-left:2px solid var(--hud)}
+  #boardList li.me .who{color:var(--hud)}
+  #boardList li.top1 .pts,#boardList li.top2 .pts,#boardList li.top3 .pts{color:var(--pain)}
+  .empty{color:var(--dim);font-size:12px;padding:14px 4px}
+  .youline{font-size:11px;color:var(--dim);margin-top:10px;letter-spacing:.04em}
+  .youline b{color:var(--hud)}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" aria-label="CORPFLY"></canvas></div>
+
+<div id="ui">
+  <div class="card" id="start" data-testid="card-start">
+    <h1>CORPFLY<small>MaleCNS v1.0 &middot; neural replay</small></h1>
+    <p>You are 166,700 neurons of a male fruit fly, connectome loaded into an enterprise. Your task: ship the agent. Tap to flap. Do not touch the buzzwords. Do not fall &mdash; the floor is burnout.</p>
+    <div class="stat"><span>Neurons</span><b>166,700</b></div>
+    <div class="stat"><span>Body mesh</span><b id="polys">NeuroMechFly</b></div>
+    <div class="stat"><span>Joints</span><b>87</b></div>
+    <div class="stat"><span>Your callsign</span><b id="myHandle">&mdash;</b></div>
+    <div class="stat"><span>Scoring</span><b>blocker 10 &middot; budget 5</b></div>
+    <div class="stat"><span>Pickups</span><b>budget &middot; shield &middot; slowdown &middot; x2</b></div>
+    <div class="hint">Tap / click / Space to flap</div>
+  </div>
+
+  <div class="card hidden" id="over" data-testid="card-over">
+    <h1>BLOCKED<small>neural activity: flatline</small></h1>
+    <p>Cause of death:</p>
+    <div class="cause" id="cause">PROCUREMENT</div>
+    <div class="stat"><span>Blockers passed</span><b id="sc">0</b></div>
+    <div class="stat"><span>Budget collected</span><b id="budget">0</b></div>
+    <div class="stat total"><span>Score</span><b id="total">0</b></div>
+    <div class="stat"><span>Personal best</span><b id="best">0</b></div>
+    <div class="stat"><span>Rank</span><b id="rank">&mdash;</b></div>
+    <div class="stat"><span>Dopamine released</span><b id="dopa">0.00</b></div>
+    <div class="hint">Skeptics note this is just a wiring diagram.</div>
+  </div>
+
+  <div class="card hidden" id="board" data-testid="card-board">
+    <h1>RANKING<small>anonymous &middot; #number + initials</small></h1>
+    <ol id="boardList" data-testid="board-list"></ol>
+    <div class="youline" id="youLine"></div>
+    <button id="closeBoard" data-testid="btn-close-board">BACK</button>
+  </div>
+</div>
+
+<!-- Нижняя панель: старт по центру, рейтинг кубком справа. Живёт вне #ui,
+     потому что #ui не принимает события и центрирует карточки. -->
+<div id="bar" data-testid="bar">
+  <button id="soundBtn" data-testid="btn-sound" aria-label="Sound" aria-pressed="true" title="Sound">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/>
+      <path class="wave" d="M15.6 9.2a4 4 0 0 1 0 5.6"/>
+      <path class="wave" d="M18.2 6.8a7.5 7.5 0 0 1 0 10.4"/>
+      <path class="slash" d="M4.5 4.5l15 15"/>
+    </svg>
+  </button>
+  <button id="go" data-testid="btn-start">START SPRINT</button>
+  <button id="boardBtn" data-testid="btn-board" aria-label="Ranking" title="Ranking">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M7 4h10v5a5 5 0 0 1-10 0V4z"/>
+      <path d="M7 5.5H4.5V7a3.5 3.5 0 0 0 3 3.46"/>
+      <path d="M17 5.5h2.5V7a3.5 3.5 0 0 1-3 3.46"/>
+      <path d="M12 14v3"/>
+      <path d="M8.5 20h7l-.8-3h-5.4l-.8 3z"/>
+    </svg>
+  </button>
+</div>
+
+<!-- Дублёр кнопки звука. Появляется ровно тогда, когда нижняя панель скрыта:
+     во время отсчёта, забега и просмотра рейтинга. Смысл в том, чтобы звук можно
+     было выключить в любой момент, а не только между раундами. -->
+<button id="soundMini" class="hidden" data-testid="btn-sound-mini" aria-label="Sound" aria-pressed="true" title="Sound">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/>
+    <path class="wave" d="M15.6 9.2a4 4 0 0 1 0 5.6"/>
+    <path class="wave" d="M18.2 6.8a7.5 7.5 0 0 1 0 10.4"/>
+    <path class="slash" d="M4.5 4.5l15 15"/>
+  </svg>
+</button>
+
+<div id="count" class="hidden" data-testid="countdown">
+  <div id="countNum" data-testid="countdown-num">3</div>
+  <div id="countHint">GET READY</div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

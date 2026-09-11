@@ -1,0 +1,28 @@
+# Статика мини-аппа. Ни сборки, ни node в рантайме: игра — это ES-модули как есть.
+# Непривилегированный вариант того же образа: uid 101, слушает 8080, root не нужен нигде.
+# Обычный nginx-образ держит мастер-процесс под root, и ради этого приходилось выдавать
+# контейнеру CHOWN/SETUID/SETGID/DAC_OVERRIDE — привилегии, которые здесь просто не нужны:
+# порт непривилегированный, конфиг статический, шаблонов нет.
+FROM nginxinc/nginx-unprivileged:1.29-alpine
+
+ARG GIT_SHA=dev
+LABEL org.opencontainers.image.title="corpfly-web" \
+      org.opencontainers.image.description="CORPFLY Telegram Mini App — static game" \
+      org.opencontainers.image.revision="${GIT_SHA}"
+
+# Базовый образ отстаёт от alpine-репозитория: trivy находил в нём HIGH с уже
+# вышедшими патчами (util-linux, libxml2, nghttp2). Догоняем репозиторий на сборке.
+# hadolint ignore=DL3017
+USER root
+RUN apk --no-cache upgrade \
+ && rm -rf /usr/share/nginx/html/* /etc/nginx/conf.d/default.conf
+COPY deploy/nginx.conf /etc/nginx/conf.d/corpfly.conf
+COPY web/ /usr/share/nginx/html/
+
+# Ревизия видна прямо из образа — и выкату, и человеку.
+RUN printf '{"ok":true,"revision":"%s"}' "${GIT_SHA}" > /usr/share/nginx/html/revision.json
+USER 101
+
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8080/healthz | grep -q '"ok"' || exit 1

@@ -1,0 +1,98 @@
+{
+  "initData": [
+    {
+      "bug": "перевод строки в значении склеивал две разные раскладки полей в одну data-check-string — одна подпись валидировала два разных разбора",
+      "input": "auth_date=1780000000%0Asignature%3DSIG&user=%7B%22id%22%3A1%7D&hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expect": "reject"
+    },
+    {
+      "bug": "дубликат ключа: get() видит первое значение, а в подпись уходят оба",
+      "input": "auth_date=1780000000&user=%7B%22id%22%3A1%7D&user=%7B%22id%22%3A2%7D&hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expect": "reject"
+    },
+    {
+      "bug": "пустая строка вместо удостоверения",
+      "input": "",
+      "expect": "reject"
+    },
+    {
+      "bug": "обрезанный хеш нужной формы, но не той длины",
+      "input": "auth_date=1780000000&hash=abc",
+      "expect": "reject"
+    },
+    {
+      "bug": "нулевые байты внутри значения",
+      "input": "auth_date=1780000000&user=%00%00&hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expect": "reject"
+    },
+    {
+      "bug": "хеш верхним регистром — форма валидна, подпись чужая",
+      "input": "auth_date=1780000000&hash=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "expect": "reject"
+    },
+    {
+      "bug": "мусор без единого поля",
+      "input": "garbage&hash=nope",
+      "expect": "reject"
+    }
+  ],
+  "scores": [
+    {
+      "bug": "строка вместо числа: Number('42') молча давал 42 и прятал поломку клиента",
+      "input": "42",
+      "expect": "reject"
+    },
+    {
+      "bug": "потолок брали с потолка: сначала 5000 при цене очка 1 (67 минут игры), потом 400. Теперь он выводится из физики движка и цены очков, а всё выше — отбивается",
+      "input": 15001,
+      "expect": "reject"
+    },
+    {
+      "bug": "дробный счёт",
+      "input": 1.5,
+      "expect": "reject"
+    },
+    {
+      "bug": "отрицательный счёт",
+      "input": -1,
+      "expect": "reject"
+    },
+    {
+      "bug": "бесконечность",
+      "input": null,
+      "expect": "reject"
+    },
+    {
+      "bug": "ноль — валиден: забег без единого пройденного блокера",
+      "input": 0,
+      "expect": "accept"
+    },
+    {
+      "bug": "ровно потолок — валиден",
+      "input": 15000,
+      "expect": "accept"
+    }
+  ],
+  "soundNames": [
+    {
+      "bug": "VOICES был литералом, поэтому play('constructor') находил унаследованное свойство и рапортовал успех",
+      "input": "constructor",
+      "expect": "reject"
+    },
+    {
+      "bug": "то же через __proto__",
+      "input": "__proto__",
+      "expect": "reject"
+    },
+    {
+      "bug": "toString из прототипа",
+      "input": "toString",
+      "expect": "reject"
+    },
+    {
+      "bug": "существующий голос обязан звучать",
+      "input": "flap",
+      "expect": "accept"
+    }
+  ]
+}
